@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="8b2d74ec-faa3-4ed6-9886-bf2aebd3138a" name="tgmpas">
+        <fileTransfer rootFolder="/var/www/parser-avito" accessType="SFTP" host="84.201.176.101" port="22" sshConfigId="a10dce3b-0614-4139-a379-5a8a0e5758d8" sshConfig="tgmaps@84.201.176.101:22 key" keyPair="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

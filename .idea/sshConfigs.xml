@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="SshConfigs">
+    <configs>
+      <sshConfig host="84.201.176.101" id="a10dce3b-0614-4139-a379-5a8a0e5758d8" keyPath="$USER_HOME$/school" port="22" nameFormat="DESCRIPTIVE" username="tgmaps" useOpenSSHConfig="true" />
+    </configs>
+  </component>
+</project>
