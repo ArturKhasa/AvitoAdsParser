@@ -18,13 +18,13 @@ const TIMEOUT_MS = 10_000;
 
 function loadProxies() {
   return readFileSync(PROXIES_FILE, 'utf-8')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean)
-    .map(line => {
-      const [host, port, user, pass] = line.split(':');
-      return `http://${user}:${pass}@${host}:${port}`;
-    });
+      .split('\n')
+      .map(l => l.trim())
+      .filter(Boolean)
+      .map(line => {
+        const [host, port, user, pass] = line.split(':');
+        return `http://${user}:${pass}@${host}:${port}`;
+      });
 }
 
 
@@ -67,7 +67,7 @@ const HEADERS_XHR = {
 
 function randomHex(bytes = 32) {
   return Array.from({ length: bytes }, () =>
-    Math.floor(Math.random() * 256).toString(16).padStart(2, '0')
+      Math.floor(Math.random() * 256).toString(16).padStart(2, '0')
   ).join('');
 }
 
@@ -93,9 +93,9 @@ async function visitAvitoAndGetCookies(dispatcher, signal) {
     // getSetCookie() возвращает массив строк вида "name=value; Path=/; ..."
     const setCookies = res.headers.getSetCookie?.() ?? [];
     const cookieStr = setCookies
-      .map((c) => c.split(';')[0].trim())  // берём только name=value
-      .filter(Boolean)
-      .join('; ');
+        .map((c) => c.split(';')[0].trim())  // берём только name=value
+        .filter(Boolean)
+        .join('; ');
     return cookieStr;
   } catch {
     return '';
@@ -3831,6 +3831,7 @@ function buildPayload(ip, cookies, overrides = {}) {
     cat_interests: ["n116", "n23", "n24", "n42", "n21", "h27", "n30", "n32", "n86", "n9", "n106", "n114"],
     ip,
     user_hash: randomHex(32),
+    auth: 0,
     user_agent: UA,
     audrandom: Math.floor(Math.random() * 100),
     blockId: '110',
@@ -3873,19 +3874,19 @@ async function upsertCreative(client, { title, subtitle, domain, click_url, adve
   const q = `
     INSERT INTO avito_creatives (title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg, first_visible_at, last_visible_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-    ON CONFLICT (title) DO UPDATE SET
+      ON CONFLICT (title) DO UPDATE SET
       subtitle        = EXCLUDED.subtitle,
-      domain          = EXCLUDED.domain,
-      click_url       = EXCLUDED.click_url,
-      advertiser_info = EXCLUDED.advertiser_info,
-      legal_info      = EXCLUDED.legal_info,
-      creative_id     = EXCLUDED.creative_id,
-      campaign_id     = EXCLUDED.campaign_id,
-      g_city          = EXCLUDED.g_city,
-      g_reg           = EXCLUDED.g_reg,
-      last_visible_at = NOW(),
-      counter         = avito_creatives.counter + 1
-    RETURNING id;
+                               domain          = EXCLUDED.domain,
+                               click_url       = EXCLUDED.click_url,
+                               advertiser_info = EXCLUDED.advertiser_info,
+                               legal_info      = EXCLUDED.legal_info,
+                               creative_id     = EXCLUDED.creative_id,
+                               campaign_id     = EXCLUDED.campaign_id,
+                               g_city          = EXCLUDED.g_city,
+                               g_reg           = EXCLUDED.g_reg,
+                               last_visible_at = NOW(),
+                               counter         = avito_creatives.counter + 1
+                               RETURNING id;
   `;
   const res = await client.query(q, [title, subtitle ?? null, domain, click_url, advertiser_info ?? null, legal_info ?? null, creative_id ?? null, campaign_id ?? null, g_city ?? null, g_reg ?? null]);
   return res.rows[0]?.id;
@@ -3896,7 +3897,7 @@ async function insertCreativeFiles(client, creativeId, fileUrls) {
   const q = `
     INSERT INTO avito_creative_files (creative_id, file_url, created_at)
     VALUES ($1, $2, NOW())
-    ON CONFLICT ON CONSTRAINT avito_creatives_files_creative_file_uniq DO NOTHING;
+      ON CONFLICT ON CONSTRAINT avito_creatives_files_creative_file_uniq DO NOTHING;
   `;
   for (const url of fileUrls) {
     await client.query(q, [creativeId, url]);
@@ -3904,10 +3905,44 @@ async function insertCreativeFiles(client, creativeId, fileUrls) {
 }
 
 
+async function saveCreative(creative, payload) {
+  if (!creative.title || !creative.clickUrl || !creative.domain) {
+    console.warn('  Skipping DB save: missing title/clickUrl/domain');
+    return;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const creativeId = await upsertCreative(client, {
+      title: creative.title,
+      subtitle: creative.subtitle,
+      domain: creative.domain,
+      click_url: creative.clickUrl,
+      advertiser_info: creative.advertiserInfo,
+      legal_info: creative.legalInfo,
+      creative_id: creative.creativeId,
+      campaign_id: creative.campaignId,
+      g_city: payload.g_city,
+      g_reg: payload.g_reg,
+    });
+    const images = creative.imageUrl ? [creative.imageUrl] : [];
+    await insertCreativeFiles(client, creativeId, images);
+    await client.query('COMMIT');
+    console.log(`  Saved to DB (id=${creativeId})`);
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('  DB error:', e?.message || e);
+  } finally {
+    client.release();
+  }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 const WORKER_INDEX = parseInt(process.env.WORKER_INDEX ?? '0');
 const WORKER_COUNT = parseInt(process.env.WORKER_COUNT ?? '1');
+const SLOTS_PER_SESSION = parseInt(process.env.SLOTS_PER_SESSION ?? '5');
+const BASE_ITEM_POSITION = 31;
 
 const allProxies = loadProxies();
 // Каждый воркер берёт свой срез прокси
@@ -3926,7 +3961,7 @@ while (true) {
   console.log(`\n[#${iteration}] proxy ${index}/${proxies.length} — ${masked}`);
 
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS * SLOTS_PER_SESSION * 2);
 
   try {
     const dispatcher = new ProxyAgent(proxyUrl);
@@ -3943,71 +3978,58 @@ while (true) {
     await sleep(jitter(1000, 2000));
 
     const xhrHeaders = cookies
-      ? { ...HEADERS_XHR, cookie: cookies }
-      : HEADERS_XHR;
+        ? { ...HEADERS_XHR, cookie: cookies }
+        : HEADERS_XHR;
 
-    const payload = buildPayload(exitIp ?? '0.0.0.0', cookies);
-    console.log(`  City/Reg: ${payload.g_city} / ${payload.g_reg} | segments: ${payload.segments.length}`);
+    const basePayload = buildPayload(exitIp ?? '0.0.0.0', cookies);
+    const sessionAdvRequestId = randomUUID();
+    console.log(`  City/Reg: ${basePayload.g_city} / ${basePayload.g_reg} | segments: ${basePayload.segments.length} | slots: ${SLOTS_PER_SESSION}`);
 
-    const response = await fetch('https://www.avito.ru/web/1/adv/network/creative', {
-      method: 'POST',
-      headers: xhrHeaders,
-      body: JSON.stringify(payload),
-      dispatcher,
-      signal: ac.signal,
-    });
+    for (let slot = 0; slot < SLOTS_PER_SESSION; slot++) {
+      const slotAlid = randomUUID();
+      const itemPosition = BASE_ITEM_POSITION + slot * 5;
 
-    clearTimeout(timer);
-
-    if (!response.ok) {
-      console.warn(`  HTTP ${response.status} ${response.statusText}`);
-      continue;
-    }
-
-    const data = await response.json();
-    const creative = extractCreative(data);
-
-    if (!creative) {
-      console.log('  No creative in response:', JSON.stringify(data));
-    } else {
-      console.log(`  Creative ID : ${creative.creativeId}`);
-      console.log(`  Title       : ${creative.title}`);
-      console.log(`  Domain      : ${creative.domain}`);
-      console.log(`  Click URL   : ${creative.clickUrl}`);
-
-      if (!creative.title || !creative.clickUrl || !creative.domain) {
-        console.warn('  Skipping DB save: missing title/clickUrl/domain');
-      } else {
-        const client = await pool.connect();
+      const makeRequest = async (blockId) => {
         try {
-          await client.query('BEGIN');
-          const creativeId = await upsertCreative(client, {
-            title: creative.title,
-            subtitle: creative.subtitle,
-            domain: creative.domain,
-            click_url: creative.clickUrl,
-            advertiser_info: creative.advertiserInfo,
-            legal_info: creative.legalInfo,
-            creative_id: creative.creativeId,
-            campaign_id: creative.campaignId,
-            g_city: payload.g_city,
-            g_reg: payload.g_reg,
+          const slotPayload = { ...basePayload, blockId, alid: slotAlid, advRequestId: sessionAdvRequestId, itemPosition };
+          const response = await fetch('https://www.avito.ru/web/1/adv/network/creative', {
+            method: 'POST',
+            headers: xhrHeaders,
+            body: JSON.stringify(slotPayload),
+            dispatcher,
+            signal: ac.signal,
           });
-          const images = creative.imageUrl ? [creative.imageUrl] : [];
-          await insertCreativeFiles(client, creativeId, images);
-          await client.query('COMMIT');
-          console.log(`  Saved to DB (id=${creativeId})`);
+          if (!response.ok) {
+            console.warn(`  [slot${slot} blk${blockId}] HTTP ${response.status} ${response.statusText}`);
+            return null;
+          }
+          return await response.json();
         } catch (e) {
-          await client.query('ROLLBACK').catch(() => {});
-          console.error('  DB error:', e?.message || e);
-        } finally {
-          client.release();
+          console.warn(`  [slot${slot} blk${blockId}] fetch error: ${e.message}`);
+          return null;
+        }
+      };
+
+      const [data110, data111] = await Promise.all([makeRequest('110'), makeRequest('111')]);
+
+      for (const [data, blockId] of [[data110, '110'], [data111, '111']]) {
+        if (!data) continue;
+        const creative = extractCreative(data);
+        if (!creative) {
+          console.log(`  [slot${slot} blk${blockId}] No creative:`, JSON.stringify(data).slice(0, 120));
+        } else {
+          console.log(`  [slot${slot} blk${blockId}] id=${creative.creativeId} | ${creative.title?.slice(0, 40)} | ${creative.domain}`);
+          await saveCreative(creative, basePayload);
         }
       }
+
+      if (slot < SLOTS_PER_SESSION - 1) await sleep(jitter(300, 400));
     }
+
+    clearTimeout(timer);
   } catch (err) {
     clearTimeout(timer);
-    const reason = err.name === 'AbortError' ? `timeout (${TIMEOUT_MS}ms)` : err.message;
+    const reason = err.name === 'AbortError' ? `timeout` : err.message;
     console.warn(`  Failed: ${reason}`);
   }
 }
