@@ -1,7 +1,7 @@
 // pm2 start ecosystem.config.cjs
 // pm2 delete all && pm2 start ecosystem.config.cjs
 
-const WORKER_COUNT = 10; // Количество параллельных воркеров
+const WORKER_COUNT = 30; // Количество параллельных воркеров
 
 module.exports = {
   apps: Array.from({ length: WORKER_COUNT }, (_, i) => ({
