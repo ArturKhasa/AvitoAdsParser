@@ -76,7 +76,11 @@ async function getExitIp(dispatcher, signal) {
     const res = await fetch('https://api.ipify.org?format=json', { dispatcher, signal });
     const { ip } = await res.json();
     return ip;
-  } catch {
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      const cause = e.cause ? ` | cause: ${e.cause.code ?? ''} ${e.cause.message ?? e.cause}` : '';
+      console.warn(`  getExitIp error: ${e.message}${cause}`);
+    }
     return null;
   }
 }
@@ -3942,7 +3946,22 @@ async function saveCreative(creative, payload) {
 const WORKER_INDEX = parseInt(process.env.WORKER_INDEX ?? '0');
 const WORKER_COUNT = parseInt(process.env.WORKER_COUNT ?? '1');
 const SLOTS_PER_SESSION = parseInt(process.env.SLOTS_PER_SESSION ?? '5');
-const BASE_ITEM_POSITION = 31;
+
+// (1) Пул рекламных блоков. В HAR fill давали 55 и 166; 110/111 чаще пустые.
+const BLOCK_IDS = ['55', '110', '111', '166'];
+
+// (2) itemPosition имитирует глубину скролла ленты (в HAR креативы шли на 170–206).
+const BASE_ITEM_POSITION = 50;
+const ITEM_POSITION_STEP = 30;
+
+// (5) Контексты страницы: разный инвентарь рекламы под разные page_type/position.
+// 'root'/'desktop_mimicry' подтверждён HAR. Остальные — кандидаты; смотри лог fill и
+// убирай мёртвые комбо (которые стабильно дают "No creative").
+const PAGE_CONTEXTS = [
+  { page_type: 'root',    position: 'desktop_mimicry' },
+  { page_type: 'catalog', position: 'desktop_mimicry' },
+  { page_type: 'item',    position: 'desktop_mimicry' },
+];
 
 const allProxies = loadProxies();
 // Каждый воркер берёт свой срез прокси
@@ -3981,13 +4000,15 @@ while (true) {
         ? { ...HEADERS_XHR, cookie: cookies }
         : HEADERS_XHR;
 
-    const basePayload = buildPayload(exitIp ?? '0.0.0.0', cookies);
+    // (5) Свой контекст страницы на сессию (ротация по итерации).
+    const ctx = PAGE_CONTEXTS[iteration % PAGE_CONTEXTS.length];
+    const basePayload = buildPayload(exitIp ?? '0.0.0.0', cookies, ctx);
     const sessionAdvRequestId = randomUUID();
-    console.log(`  City/Reg: ${basePayload.g_city} / ${basePayload.g_reg} | segments: ${basePayload.segments.length} | slots: ${SLOTS_PER_SESSION}`);
+    console.log(`  City/Reg: ${basePayload.g_city} / ${basePayload.g_reg} | ctx: ${ctx.page_type}/${ctx.position} | segments: ${basePayload.segments.length} | slots: ${SLOTS_PER_SESSION} | blocks: ${BLOCK_IDS.join(',')}`);
 
     for (let slot = 0; slot < SLOTS_PER_SESSION; slot++) {
       const slotAlid = randomUUID();
-      const itemPosition = BASE_ITEM_POSITION + slot * 5;
+      const itemPosition = BASE_ITEM_POSITION + slot * ITEM_POSITION_STEP;
 
       const makeRequest = async (blockId) => {
         try {
@@ -4005,14 +4026,18 @@ while (true) {
           }
           return await response.json();
         } catch (e) {
-          console.warn(`  [slot${slot} blk${blockId}] fetch error: ${e.message}`);
+          const cause = e.cause ? ` | cause: ${e.cause.code ?? ''} ${e.cause.message ?? e.cause}` : '';
+          console.warn(`  [slot${slot} blk${blockId}] fetch error: ${e.message}${cause}`);
           return null;
         }
       };
 
-      const [data110, data111] = await Promise.all([makeRequest('110'), makeRequest('111')]);
+      // (1) Бьём весь пул блоков параллельно под один alid.
+      const results = await Promise.all(BLOCK_IDS.map(makeRequest));
 
-      for (const [data, blockId] of [[data110, '110'], [data111, '111']]) {
+      for (let i = 0; i < BLOCK_IDS.length; i++) {
+        const data = results[i];
+        const blockId = BLOCK_IDS[i];
         if (!data) continue;
         const creative = extractCreative(data);
         if (!creative) {
