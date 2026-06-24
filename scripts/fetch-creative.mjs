@@ -3861,6 +3861,7 @@ function extractCreative(data) {
   const { content, pixels, props } = creative;
   return {
     title: content?.title ?? null,
+    erid: content?.erid ?? null,
     subtitle: content?.description ?? null,
     advertiserInfo: content?.externalLegalInfo ?? null,
     legalInfo: content?.legalInfo ?? null,
@@ -3874,12 +3875,13 @@ function extractCreative(data) {
   };
 }
 
-async function upsertCreative(client, { title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg }) {
+async function upsertCreative(client, { erid, title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg }) {
   const q = `
-    INSERT INTO avito_creatives (title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg, first_visible_at, last_visible_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-      ON CONFLICT (title) DO UPDATE SET
-      subtitle        = EXCLUDED.subtitle,
+    INSERT INTO avito_creatives (erid, title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg, first_visible_at, last_visible_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+      ON CONFLICT (erid) DO UPDATE SET
+      title           = EXCLUDED.title,
+                               subtitle        = EXCLUDED.subtitle,
                                domain          = EXCLUDED.domain,
                                click_url       = EXCLUDED.click_url,
                                advertiser_info = EXCLUDED.advertiser_info,
@@ -3892,7 +3894,7 @@ async function upsertCreative(client, { title, subtitle, domain, click_url, adve
                                counter         = avito_creatives.counter + 1
                                RETURNING id;
   `;
-  const res = await client.query(q, [title, subtitle ?? null, domain, click_url, advertiser_info ?? null, legal_info ?? null, creative_id ?? null, campaign_id ?? null, g_city ?? null, g_reg ?? null]);
+  const res = await client.query(q, [erid, title, subtitle ?? null, domain, click_url, advertiser_info ?? null, legal_info ?? null, creative_id ?? null, campaign_id ?? null, g_city ?? null, g_reg ?? null]);
   return res.rows[0]?.id;
 }
 
@@ -3910,6 +3912,10 @@ async function insertCreativeFiles(client, creativeId, fileUrls) {
 
 
 async function saveCreative(creative, payload) {
+  if (!creative.erid) {
+    console.error(`  DB error: missing erid — skipping (title="${creative.title?.slice(0, 50)}")`);
+    return;
+  }
   if (!creative.title || !creative.clickUrl || !creative.domain) {
     console.warn('  Skipping DB save: missing title/clickUrl/domain');
     return;
@@ -3918,6 +3924,7 @@ async function saveCreative(creative, payload) {
   try {
     await client.query('BEGIN');
     const creativeId = await upsertCreative(client, {
+      erid: creative.erid,
       title: creative.title,
       subtitle: creative.subtitle,
       domain: creative.domain,
