@@ -3862,6 +3862,8 @@ function extractCreative(data) {
   return {
     title: content?.title ?? null,
     erid: content?.erid ?? null,
+    imageRatioX: content?.imageRatioX ?? null,
+    imageRatioY: content?.imageRatioY ?? null,
     subtitle: content?.description ?? null,
     advertiserInfo: content?.externalLegalInfo ?? null,
     legalInfo: content?.legalInfo ?? null,
@@ -3875,14 +3877,16 @@ function extractCreative(data) {
   };
 }
 
-async function upsertCreative(client, { erid, title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg }) {
+async function upsertCreative(client, { erid, title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg, image_ratio_x, image_ratio_y }) {
   const q = `
-    INSERT INTO avito_creatives (erid, title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg, first_visible_at, last_visible_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+    INSERT INTO avito_creatives (erid, title, subtitle, domain, click_url, advertiser_info, legal_info, creative_id, campaign_id, g_city, g_reg, image_ratio_x, image_ratio_y, first_visible_at, last_visible_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
       ON CONFLICT (erid) DO UPDATE SET
       title           = EXCLUDED.title,
                                subtitle        = EXCLUDED.subtitle,
                                domain          = EXCLUDED.domain,
+                               image_ratio_x   = EXCLUDED.image_ratio_x,
+                               image_ratio_y   = EXCLUDED.image_ratio_y,
                                click_url       = EXCLUDED.click_url,
                                advertiser_info = EXCLUDED.advertiser_info,
                                legal_info      = EXCLUDED.legal_info,
@@ -3894,8 +3898,22 @@ async function upsertCreative(client, { erid, title, subtitle, domain, click_url
                                counter         = avito_creatives.counter + 1
                                RETURNING id;
   `;
-  const res = await client.query(q, [erid, title, subtitle ?? null, domain, click_url, advertiser_info ?? null, legal_info ?? null, creative_id ?? null, campaign_id ?? null, g_city ?? null, g_reg ?? null]);
+  const res = await client.query(q, [erid, title, subtitle ?? null, domain, click_url, advertiser_info ?? null, legal_info ?? null, creative_id ?? null, campaign_id ?? null, g_city ?? null, g_reg ?? null, image_ratio_x ?? null, image_ratio_y ?? null]);
   return res.rows[0]?.id;
+}
+
+// Связь креатив <-> категория показа. Many-to-many: один erid крутится в нескольких категориях,
+// а ON CONFLICT (erid) схлопывает строку креатива, поэтому категорию нельзя держать колонкой.
+async function insertCreativeCategory(client, creativeId, category) {
+  if (!creativeId || !category) return;
+  const q = `
+    INSERT INTO avito_creative_categories (creative_id, category_id, microcategory_id, category_name)
+    VALUES ($1, $2, $3, $4)
+      ON CONFLICT ON CONSTRAINT avito_creative_categories_uniq DO UPDATE SET
+      last_seen_at = NOW(),
+                     counter      = avito_creative_categories.counter + 1;
+  `;
+  await client.query(q, [creativeId, category.category_id, category.microcategory_id, category.name ?? null]);
 }
 
 async function insertCreativeFiles(client, creativeId, fileUrls) {
@@ -3911,7 +3929,7 @@ async function insertCreativeFiles(client, creativeId, fileUrls) {
 }
 
 
-async function saveCreative(creative, payload) {
+async function saveCreative(creative, payload, category) {
   if (!creative.erid) {
     console.error(`  DB error: missing erid — skipping (title="${creative.title?.slice(0, 50)}")`);
     return;
@@ -3935,9 +3953,12 @@ async function saveCreative(creative, payload) {
       campaign_id: creative.campaignId,
       g_city: payload.g_city,
       g_reg: payload.g_reg,
+      image_ratio_x: creative.imageRatioX,
+      image_ratio_y: creative.imageRatioY,
     });
     const images = creative.imageUrl ? [creative.imageUrl] : [];
     await insertCreativeFiles(client, creativeId, images);
+    await insertCreativeCategory(client, creativeId, category);
     await client.query('COMMIT');
     console.log(`  Saved to DB (id=${creativeId})`);
   } catch (e) {
@@ -3954,21 +3975,101 @@ const WORKER_INDEX = parseInt(process.env.WORKER_INDEX ?? '0');
 const WORKER_COUNT = parseInt(process.env.WORKER_COUNT ?? '1');
 const SLOTS_PER_SESSION = parseInt(process.env.SLOTS_PER_SESSION ?? '5');
 
-// (1) Пул рекламных блоков. В HAR fill давали 55 и 166; 110/111 чаще пустые.
-const BLOCK_IDS = ['55', '110', '111', '166'];
-
 // (2) itemPosition имитирует глубину скролла ленты (в HAR креативы шли на 170–206).
 const BASE_ITEM_POSITION = 50;
 const ITEM_POSITION_STEP = 30;
 
-// (5) Контексты страницы: разный инвентарь рекламы под разные page_type/position.
-// 'root'/'desktop_mimicry' подтверждён HAR. Остальные — кандидаты; смотри лог fill и
-// убирай мёртвые комбо (которые стабильно дают "No creative").
+// Контексты страницы. Блоки привязаны к контексту: реклама search_page отдаётся только
+// в блоке 167, а 55/166 живут в ленте — гонять их крест-накрест значит слать мёртвые запросы.
+//
+//  - root/desktop_mimicry     подтверждён HAR (лента главной)
+//  - search_page/vr_top + 167 подтверждён curl'ом с категорийной страницы; itemPosition там
+//                             не передаётся вообще, поэтому sendItemPosition: false
+//  - catalog/item             кандидаты; смотри лог fill и убирай стабильно пустые комбо
 const PAGE_CONTEXTS = [
-  { page_type: 'root',    position: 'desktop_mimicry' },
-  { page_type: 'catalog', position: 'desktop_mimicry' },
-  { page_type: 'item',    position: 'desktop_mimicry' },
+  { page_type: 'root',        position: 'desktop_mimicry', blockIds: ['55', '110', '111', '166'], sendItemPosition: true },
+  // blockId на search_page зависит от категории: наблюдали 76 (Автомобили) и 167 (Аренда
+  // спецтехники). Правило неизвестно, поэтому бьём пулом и смотрим, какой отдаёт fill.
+  { page_type: 'search_page', position: 'vr_top',          blockIds: ['76', '167'],               sendItemPosition: false },
+  { page_type: 'catalog',     position: 'desktop_mimicry', blockIds: ['55', '110', '111', '166'], sendItemPosition: true },
+  { page_type: 'item',        position: 'desktop_mimicry', blockIds: ['55', '110', '111', '166'], sendItemPosition: true },
 ];
+
+// Глубина дерева категорий для ротации. 0 = только корни (11 вертикалей) — начальная точка.
+// Поднимай до 1/2 только убедившись по логам, что erid реально меняется от категории к категории;
+// иначе получишь 15x одинаковых запросов за тот же инвентарь (на ~800 узлов всего ~50 category_id).
+const CATEGORY_LEVEL = parseInt(process.env.CATEGORY_LEVEL ?? '0');
+
+// master_category — id вертикали. У большинства вертикалей master = root.category_id, но у
+// Услуг дерево показывает 114, а рекламный API ждёт 113 (подтверждено curl'ом: master=113 при
+// slave=114). Override по имени корня.
+const MASTER_OVERRIDE = { 'Услуги': 113 };
+
+// Вывод master для листа (правило сошлось на 3 ground-truth сэмплах — Авто=1/Квартиры=4/Услуги=113):
+//  1) если slave (category_id листа) сам является id вертикали (root.category_id), лист
+//     ПРИНАДЛЕЖИТ этой вертикали, даже если nav-дерево положило его под другой корень.
+//     Пример: «Аренда спецтехники» лежит под Транспортом, но slave=114 (корень Услуг) → 113.
+//     «Запчасти под Транспортом» slave=10 → 10. Поэтому byCatId проверяем ПЕРВЫМ.
+//  2) иначе — идём по parent_id до level-0 предка и берём master его вертикали.
+//     path использовать нельзя: у части строк он NULL.
+// Узлы-дубли под «Бизнес 360» (корень с category_id=NULL) дают master=null и отбрасываются —
+// это точные копии реальных категорий (тот же slave/mc), реальные близнецы остаются.
+function buildMaster(byId, byCatId, row) {
+  const slave = Number(row.category_id);
+  if (byCatId.has(slave)) return byCatId.get(slave);
+  let cur = row, guard = 0;
+  while (cur && cur.level !== 0 && cur.parent_id != null && guard++ < 20) {
+    cur = byId.get(String(cur.parent_id));
+  }
+  const rootCat = cur && cur.category_id != null ? Number(cur.category_id) : null;
+  return rootCat != null ? (byCatId.get(rootCat) ?? null) : null;
+}
+
+// Справочник читается один раз на старте одним запросом (всё дерево, ~807 строк): нужен полный
+// набор для обхода parent_id. Пулер (Odyssey) периодически рвёт коннект — без retry старт падал
+// бы, а pm2 с --restart-delay 8500000 усыпил бы воркер на 2.4 часа.
+async function loadCategories(attempts = 10) {
+  const q = `SELECT id, parent_id, level, category_id, microcategory_id, name, sort_order
+             FROM avito_categories`;
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const rows = (await pool.query(q)).rows;
+      const byId = new Map();
+      for (const r of rows) byId.set(String(r.id), r);
+      const byCatId = new Map();
+      for (const r of rows) {
+        if (r.level === 0 && r.category_id != null) {
+          byCatId.set(Number(r.category_id), MASTER_OVERRIDE[r.name] ?? Number(r.category_id));
+        }
+      }
+      const leaves = rows
+        .filter(r => r.level === CATEGORY_LEVEL && r.category_id != null && r.microcategory_id != null)
+        .sort((a, b) => (a.sort_order ?? 1e9) - (b.sort_order ?? 1e9) || Number(a.id) - Number(b.id))
+        .map(r => ({
+          category_id: Number(r.category_id),
+          microcategory_id: Number(r.microcategory_id),
+          name: r.name,
+          master_category: buildMaster(byId, byCatId, r),
+        }));
+      const dropped = leaves.filter(c => c.master_category == null).length;
+      if (dropped) console.warn(`  loadCategories: dropped ${dropped} rows without master (дубли под Бизнес 360)`);
+      return leaves.filter(c => c.master_category != null);
+    } catch (e) {
+      lastErr = e;
+      console.warn(`  loadCategories try ${i}/${attempts} failed: ${e.message}`);
+      await sleep(1500);
+    }
+  }
+  throw lastErr;
+}
+
+const CATEGORIES = await loadCategories();
+if (!CATEGORIES.length) {
+  console.error(`No categories at level=${CATEGORY_LEVEL} — aborting`);
+  process.exit(1);
+}
+console.log(`Categories (level=${CATEGORY_LEVEL}): ${CATEGORIES.length} — ${CATEGORIES.map(c => `${c.name}[m${c.master_category}/s${c.category_id}]`).join(', ')}`);
 
 const allProxies = loadProxies();
 // Каждый воркер берёт свой срез прокси
@@ -4008,10 +4109,21 @@ while (true) {
         : HEADERS_XHR;
 
     // (5) Свой контекст страницы на сессию (ротация по итерации).
-    const ctx = PAGE_CONTEXTS[iteration % PAGE_CONTEXTS.length];
-    const basePayload = buildPayload(exitIp ?? '0.0.0.0', cookies, ctx);
+    const { blockIds, sendItemPosition, ...pageCtx } = PAGE_CONTEXTS[iteration % PAGE_CONTEXTS.length];
+    // Категория показа — вторая ось ротации. 4 контекста и 11 категорий взаимно просты,
+    // поэтому за 44 итерации проходятся все пары.
+    const category = CATEGORIES[iteration % CATEGORIES.length];
+    // category_id справочника = slave_category (узел 4128 имеет category_id=114, запрос шлёт
+    // slave_category=114). microcategory_id = microCategory. master_category = id вертикали
+    // (root.category_id, Услуги→113), выведён при загрузке справочника.
+    const basePayload = buildPayload(exitIp ?? '0.0.0.0', cookies, {
+      ...pageCtx,
+      master_category: category.master_category,
+      slave_category: category.category_id,
+      microCategory: category.microcategory_id,
+    });
     const sessionAdvRequestId = randomUUID();
-    console.log(`  City/Reg: ${basePayload.g_city} / ${basePayload.g_reg} | ctx: ${ctx.page_type}/${ctx.position} | segments: ${basePayload.segments.length} | slots: ${SLOTS_PER_SESSION} | blocks: ${BLOCK_IDS.join(',')}`);
+    console.log(`  City/Reg: ${basePayload.g_city} / ${basePayload.g_reg} | ctx: ${pageCtx.page_type}/${pageCtx.position} | cat: ${category.name} (m${category.master_category ?? '?'}/s${category.category_id}/mc${category.microcategory_id}) | segments: ${basePayload.segments.length} | slots: ${SLOTS_PER_SESSION} | blocks: ${blockIds.join(',')}`);
 
     for (let slot = 0; slot < SLOTS_PER_SESSION; slot++) {
       const slotAlid = randomUUID();
@@ -4019,7 +4131,9 @@ while (true) {
 
       const makeRequest = async (blockId) => {
         try {
-          const slotPayload = { ...basePayload, blockId, alid: slotAlid, advRequestId: sessionAdvRequestId, itemPosition };
+          const slotPayload = { ...basePayload, blockId, alid: slotAlid, advRequestId: sessionAdvRequestId };
+          // На search_page реальный клиент itemPosition не шлёт — не добавляем и мы.
+          if (sendItemPosition) slotPayload.itemPosition = itemPosition;
           const response = await fetch('https://www.avito.ru/web/1/adv/network/creative', {
             method: 'POST',
             headers: xhrHeaders,
@@ -4039,19 +4153,19 @@ while (true) {
         }
       };
 
-      // (1) Бьём весь пул блоков параллельно под один alid.
-      const results = await Promise.all(BLOCK_IDS.map(makeRequest));
+      // (1) Бьём весь пул блоков этого контекста параллельно под один alid.
+      const results = await Promise.all(blockIds.map(makeRequest));
 
-      for (let i = 0; i < BLOCK_IDS.length; i++) {
+      for (let i = 0; i < blockIds.length; i++) {
         const data = results[i];
-        const blockId = BLOCK_IDS[i];
+        const blockId = blockIds[i];
         if (!data) continue;
         const creative = extractCreative(data);
         if (!creative) {
           console.log(`  [slot${slot} blk${blockId}] No creative:`, JSON.stringify(data).slice(0, 120));
         } else {
           console.log(`  [slot${slot} blk${blockId}] id=${creative.creativeId} | ${creative.title?.slice(0, 40)} | ${creative.domain}`);
-          await saveCreative(creative, basePayload);
+          await saveCreative(creative, basePayload, category);
         }
       }
 
