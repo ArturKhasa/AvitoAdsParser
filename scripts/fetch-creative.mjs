@@ -3930,8 +3930,11 @@ async function insertCreativeFiles(client, creativeId, fileUrls) {
 
 
 async function saveCreative(creative, payload, category) {
+  // Нет erid — это собственные баннеры Avito (системный дом-баннер id=2923604/3366658,
+  // самопромо «Ремонт со скидками…» и т.п.): своя реклама erid по закону не несёт. Штатный
+  // пропуск, НЕ ошибка — пишем в stdout спокойно, чтобы не мигало красным и не путало порядок.
   if (!creative.erid) {
-    console.error(`  DB error: missing erid — skipping (title="${creative.title?.slice(0, 50)}")`);
+    console.log(`  skip (no erid): ${creative.domain} | ${creative.title?.slice(0, 40) ?? 'untitled'}`);
     return;
   }
   if (!creative.title || !creative.clickUrl || !creative.domain) {
