@@ -5,13 +5,51 @@ import pg from 'pg';
 // pm2 start scripts/fetch-creative.mjs --restart-delay 8500000
 const { Pool } = pg;
 
-const pool = new Pool({
-  connectionString: 'postgres://avimaps:R\\zTGKWil^*j[b6@c-c9q2tjkhcoelkia86tnk.rw.mdb.yandexcloud.net:6432/db3',
-  ssl: {
-    rejectUnauthorized: true,
-    ca: readFileSync(new URL('../root.crt', import.meta.url).pathname).toString(),
-  },
-});
+// Настройки БД берём из .env бэкенда (BACKEND_ENV_PATH), иначе из DATABASE_URL,
+// иначе — прежний хардкод, чтобы старые запуски не сломались.
+function readBackendEnv(path) {
+  const env = {};
+  for (const line of readFileSync(path, 'utf-8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const i = t.indexOf('=');
+    if (i === -1) continue;
+    env[t.slice(0, i).trim()] = t.slice(i + 1).trim().replace(/^["']|["']$/g, '');
+  }
+  return env;
+}
+
+function buildPoolConfig() {
+  const backendEnvPath = process.env.BACKEND_ENV_PATH;
+  if (backendEnvPath) {
+    const env = readBackendEnv(backendEnvPath);
+    return {
+      host: env.DB_HOST_WRITE || env.DB_HOST,
+      port: Number(env.DB_PORT ?? 5432),
+      database: env.DB_DATABASE,
+      user: env.DB_USERNAME,
+      password: env.DB_PASSWORD,
+      ssl: { rejectUnauthorized: false },
+    };
+  }
+
+  if (process.env.DATABASE_URL) {
+    return {
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+    };
+  }
+
+  return {
+    connectionString: 'postgres://avimaps:R\\zTGKWil^*j[b6@c-c9q2tjkhcoelkia86tnk.rw.mdb.yandexcloud.net:6432/db3',
+    ssl: {
+      rejectUnauthorized: true,
+      ca: readFileSync(new URL('../root.crt', import.meta.url).pathname).toString(),
+    },
+  };
+}
+
+const pool = new Pool(buildPoolConfig());
 
 const PROXIES_FILE = new URL('../proxys.txt', import.meta.url).pathname;
 const TIMEOUT_MS = 10_000;
